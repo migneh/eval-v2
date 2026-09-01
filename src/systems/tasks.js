@@ -19,7 +19,6 @@ import { EmbedBuilder } from "discord.js";
 import {
   getConfig,
   getTaskConfig,
-  saveTaskConfig,
   getTaskProgress,
   saveTaskProgress,
   addPointsToUser,
@@ -229,7 +228,6 @@ export async function checkExpiredTasks(guild) {
 
   const progress = getTaskProgress(guild.id);
   const now      = Date.now();
-  const config   = getConfig(guild.id);
   let   notified = 0;
   let   changed  = false;
 

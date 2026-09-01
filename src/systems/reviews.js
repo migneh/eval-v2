@@ -24,9 +24,6 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
 } from "discord.js";
 
 import {
@@ -403,6 +400,8 @@ export async function acceptReview(guild, reviewId, reviewerId) {
   const points = calcExpectedPoints(review, config);
 
   // ─── تحديث الطلب ─────────────────────────────────────────────────────────────
+  clearReminder(guild.id, reviewId);
+
   review.status     = "accepted";
   review.reviewerId = reviewerId;
   review.reviewedAt = Date.now();
@@ -493,6 +492,8 @@ export async function rejectReview(guild, reviewId, reviewerId, rejectReason = "
   const canAppeal = review.appealNumber < MAX_APPEALS;
 
   // ─── تحديث الطلب ─────────────────────────────────────────────────────────────
+  clearReminder(guild.id, reviewId);
+
   review.status       = "rejected";
   review.reviewerId   = reviewerId;
   review.reviewedAt   = Date.now();
@@ -695,6 +696,58 @@ async function notifyExecutor(
   }
 }
 
+// مؤقتات التذكير النشطة: `${guildId}:${reviewId}` → Timeout
+// نحتفظ بالمرجع لنتمكن من الإلغاء وإعادة الجدولة
+const reminderTimers = new Map();
+
+/**
+ * يُلغي مؤقت تذكير معلّق لطلب معين
+ *
+ * @param {string} guildId
+ * @param {string} reviewId
+ */
+function clearReminder(guildId, reviewId) {
+  const key = `${guildId}:${reviewId}`;
+  const t   = reminderTimers.get(key);
+  if (t) {
+    clearTimeout(t);
+    reminderTimers.delete(key);
+  }
+}
+
+/**
+ * يُعيد جدولة تذكيرات الطلبات المعلّقة بعد إعادة تشغيل البوت
+ *
+ * المشكلة التي يحلّها:
+ *   setTimeout كان في الذاكرة فقط — أي إعادة تشغيل تُفقد كل التذكيرات المعلّقة،
+ *   فتبقى الطلبات بلا مراجعة لأيام دون أي تنبيه.
+ *   الآن نحفظ remindAt داخل الطلب ونعيد بناء المؤقتات عند الإقلاع.
+ *
+ * يُستدعى من حدث ready في index.js
+ *
+ * @param {Guild} guild
+ * @returns {number} - عدد التذكيرات التي أُعيدت جدولتها
+ */
+export function rescheduleReminders(guild) {
+  const reviews = getReviews(guild.id);
+  const now     = Date.now();
+  let   count   = 0;
+
+  for (const review of Object.values(reviews)) {
+    if (review.status !== "pending") continue;
+
+    const delay = (review.remindAt ?? 0) - now;
+
+    // وقت التذكير مضى أثناء الإطفاء — لا نُرسل تنبيهاً متأخراً بلا معنى
+    if (delay <= 0) continue;
+
+    scheduleReminder(guild, review.id, review.channelId, !!review.isAppeal, delay);
+    count++;
+  }
+
+  return count;
+}
+
 /**
  * يُجدول تنبيه تأخر المراجعة بعد ساعة
  * إذا بقي الطلب pending لأكثر من ساعة → يُرسل ping في القناة
@@ -703,9 +756,16 @@ async function notifyExecutor(
  * @param {string}  reviewId
  * @param {string}  channelId
  * @param {boolean} isAppeal    - هل هو استئناف؟
+ * @param {number}  [delayMs]   - التأخير (افتراضياً ساعة) — يُمرَّر عند إعادة الجدولة
  */
-function scheduleReminder(guild, reviewId, channelId, isAppeal) {
-  setTimeout(async () => {
+function scheduleReminder(guild, reviewId, channelId, isAppeal, delayMs = REMINDER_DELAY_MS) {
+  const key = `${guild.id}:${reviewId}`;
+
+  // ألغِ أي مؤقت سابق لهذا الطلب (مهم: الاستئناف يُعيد استخدام نفس المعرّف)
+  clearReminder(guild.id, reviewId);
+
+  const timer = setTimeout(async () => {
+    reminderTimers.delete(key);
     try {
       const reviews = getReviews(guild.id);
       const review  = reviews[reviewId];
@@ -731,7 +791,19 @@ function scheduleReminder(guild, reviewId, channelId, isAppeal) {
     } catch {
       // السيرفر أو القناة غير متاحة
     }
-  }, REMINDER_DELAY_MS);
+  }, delayMs);
+
+  // لا يمنع المؤقت إيقاف عملية Node
+  timer.unref?.();
+
+  reminderTimers.set(key, timer);
+
+  // احفظ وقت التذكير في الطلب ليُعاد بناؤه بعد إعادة التشغيل
+  const reviews = getReviews(guild.id);
+  if (reviews[reviewId]) {
+    reviews[reviewId].remindAt = Date.now() + delayMs;
+    saveReviews(guild.id, reviews);
+  }
 }
 
 /**
@@ -749,6 +821,36 @@ function generateReviewId() {
 // ─────────────────────────────────────────────────────────────────────────────
 // دوال استعلام مُصدَّرة
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * يحذف الطلبات القديمة المحسومة ( non-pending ) لتفادي نمو الملف بلا حد
+ *
+ * الطلبات **المعلّقة لا تُحذف أبداً** — ما زالت تحتاج مراجعة.
+ *
+ * @param {string} guildId
+ * @param {number} [maxAgeMs] - عمر الطلب الأقصى (افتراضي 90 يوماً)
+ * @returns {number}          - عدد الطلبات المحذوفة
+ */
+export function pruneReviews(guildId, maxAgeMs = 90 * 24 * 60 * 60 * 1000) {
+  const reviews = getReviews(guildId);
+  const now     = Date.now();
+  let   removed = 0;
+
+  for (const [id, review] of Object.entries(reviews)) {
+    // لا تلمس المعلّقة
+    if (review.status === "pending") continue;
+
+    if (now - (review.createdAt || 0) > maxAgeMs) {
+      clearReminder(guildId, id);
+      delete reviews[id];
+      removed++;
+    }
+  }
+
+  if (removed) saveReviews(guildId, reviews);
+
+  return removed;
+}
 
 /**
  * يُرجع كل الطلبات المعلّقة مرتبة حسب الأولوية

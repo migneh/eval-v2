@@ -16,10 +16,7 @@ import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import { getConfig, getUserPoints }           from "../utils/db.js";
 import { requireMod }                         from "../utils/perms.js";
 import { getUserPromotionHistory }             from "../systems/promotions.js";
-import {
-  buildProgressBar,
-  formatTimeLeft,
-} from "../systems/tasks.js";
+import { buildProgressBar } from "../systems/tasks.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تعريف الأمر

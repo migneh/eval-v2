@@ -14,7 +14,7 @@ import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 
 import { getConfig, getUserPoints }      from "../utils/db.js";
 import { requireMod }                    from "../utils/perms.js";
-import { buildProgressBar, formatTimeLeft, getTypeLabel } from "../systems/tasks.js";
+import { buildProgressBar } from "../systems/tasks.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تعريف الأمر
@@ -43,6 +43,10 @@ export async function execute(interaction) {
   // ─── تحديد الهدف ─────────────────────────────────────────────────────────────
   const targetUser = interaction.options.getUser("member") || interaction.user;
   const isSelf     = targetUser.id === interaction.user.id;
+
+  // ─── تأجيل الرد أولاً ────────────────────────────────────────────────────────
+  // جلب بيانات العضو قد يتجاوز مهلة ديسكورد (3 ثوانٍ) في السيرفرات الكبيرة
+  await interaction.deferReply();
 
   // ─── جلب بيانات العضو ────────────────────────────────────────────────────────
   let member;
@@ -163,7 +167,7 @@ export async function execute(interaction) {
   if (progressField) embed.addFields(progressField);
   if (historyField)  embed.addFields(historyField);
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.editReply({ embeds: [embed] });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

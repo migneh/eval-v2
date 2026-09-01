@@ -13,6 +13,7 @@ import {
 import { handleMessageCreate } from "./events/messageCreate.js";
 import { handleInteractionCreate } from "./events/interactionCreate.js";
 import { incrementTaskProgress, checkExpiredTasks } from "./systems/tasks.js";
+import { rescheduleReminders, pruneReviews } from "./systems/reviews.js";
 import { loadConfig } from "./utils/config-loader.js";
 
 // ─── استيراد الأوامر ──────────────────────────────────────────────────────────
@@ -106,6 +107,25 @@ client.once("ready", (c) => {
     activities: [{ name: "/help | إدارة النقاط", type: 0 }],
     status: "online",
   });
+
+  // ─── استعادة التذكيرات المعلّقة بعد إعادة التشغيل ──────────────────────────
+  // كانت المؤقتات في الذاكرة فقط فتضيع مع كل إعادة تشغيل
+  (async () => {
+    let restored = 0;
+    let pruned   = 0;
+
+    for (const guild of c.guilds.cache.values()) {
+      try {
+        restored += rescheduleReminders(guild);
+        pruned   += pruneReviews(guild.id);
+      } catch (err) {
+        console.error(`❌ خطأ في استعادة تذكيرات ${guild.id}:`, err.message);
+      }
+    }
+
+    if (restored) console.log(`🔔 تم استعادة ${restored} تذكير مراجعة معلّق`);
+    if (pruned)   console.log(`🧹 تم أرشفة ${pruned} طلب مراجعة قديم`);
+  })();
 });
 
 // ─── حدث: رسالة جديدة (XP + تقدم المهام) ────────────────────────────────────
@@ -184,8 +204,14 @@ const taskCheckTimer = setInterval(async () => {
   for (const guild of client.guilds.cache.values()) {
     try {
       await checkExpiredTasks(guild);
+
+      // تنظيف دوري — يمنع نمو reviews.json بلا حد
+      const removed = pruneReviews(guild.id);
+      if (removed) {
+        console.log(`🧹 أُرشف ${removed} طلب قديم في ${guild.name}`);
+      }
     } catch (err) {
-      console.error(`❌ خطأ في فحص المهام المنتهية (${guild.id}):`, err);
+      console.error(`❌ خطأ في الفحص الدوري (${guild.id}):`, err.message);
     }
   }
 }, HOUR_MS);

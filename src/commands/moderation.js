@@ -93,13 +93,31 @@ export async function executeWarn(interaction) {
     });
   }
 
-  // فحص هرمية الرتب — لا تحذّر من هو أعلى رتبة منك
-  const executorMember = interaction.member;
+  // ─── جلب عضو المنفذ بشكل كامل ───────────────────────────────────────────────
+  // interaction.member قد يأتي ككائن جزئي (APIInteractionGuildMember) فيه
+  // roles مصفوفة نصوص بدل RoleManager — وحينها roles.highest.position
+  // يرمي TypeError ويُسقط الأمر بالكامل
+  let executorMember;
+  try {
+    executorMember = await interaction.guild.members.fetch(interaction.user.id);
+  } catch {
+    return interaction.editReply({
+      embeds: [errorEmbed("لم يُعثر على عضويتك في السيرفر.")],
+    });
+  }
+
   if (
     !interaction.guild.members.me?.permissions.has(PermissionFlagsBits.ModerateMembers)
   ) {
     return interaction.editReply({
       embeds: [errorEmbed("البوت لا يملك صلاحية ModerateMembers.")],
+    });
+  }
+
+  // ─── حماية مالك السيرفر (كانت موجودة في /timeout فقط) ───────────────────────
+  if (targetUser.id === interaction.guild.ownerId) {
+    return interaction.editReply({
+      embeds: [errorEmbed("لا يمكن تحذير مالك السيرفر.")],
     });
   }
 
@@ -241,8 +259,17 @@ export async function executeTimeout(interaction) {
     });
   }
 
+  // ─── جلب عضو المنفذ بشكل كامل (تفادي الكائن الجزئي) ─────────────────────────
+  let executorMember;
+  try {
+    executorMember = await interaction.guild.members.fetch(interaction.user.id);
+  } catch {
+    return interaction.editReply({
+      embeds: [errorEmbed("لم يُعثر على عضويتك في السيرفر.")],
+    });
+  }
+
   // فحص هرمية الرتب
-  const executorMember = interaction.member;
   if (
     executorMember.roles.highest.position <= targetMember.roles.highest.position &&
     interaction.guild.ownerId !== interaction.user.id

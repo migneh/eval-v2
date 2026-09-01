@@ -50,13 +50,17 @@ export async function execute(interaction) {
   // ─── فحص الصلاحية ────────────────────────────────────────────────────────────
   if (!requireMod(interaction, config)) return;
 
+  // ─── تأجيل الرد أولاً ────────────────────────────────────────────────────────
+  // buildPageEmbed يستدعي members.fetch() لكل صف — قد يتجاوز 3 ثوانٍ بسهولة
+  await interaction.deferReply();
+
   // ─── جلب البيانات ────────────────────────────────────────────────────────────
   const sorted     = getSortedLeaderboard(interaction.guildId);
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
 
   // ─── Empty State ──────────────────────────────────────────────────────────────
   if (!sorted.length) {
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [
         new EmbedBuilder()
           .setColor(0x5865f2)
@@ -81,10 +85,12 @@ export async function execute(interaction) {
     currentPage = Math.floor(myRank / PAGE_SIZE);
   }
 
-  const embed = await buildPageEmbed(interaction, sorted, currentPage, totalPages, myRank);
+  const resolveNames = createNameResolver(interaction);
+
+  const embed = await buildPageEmbed(interaction, sorted, currentPage, totalPages, myRank, resolveNames);
   const row   = buildNavRow(currentPage, totalPages);
 
-  await interaction.reply({
+  await interaction.editReply({
     embeds:     [embed],
     components: totalPages > 1 ? [row] : [],
   });
@@ -108,7 +114,7 @@ export async function execute(interaction) {
       case "top_last":  currentPage = totalPages - 1;  break;
     }
 
-    const newEmbed = await buildPageEmbed(interaction, sorted, currentPage, totalPages, myRank);
+    const newEmbed = await buildPageEmbed(interaction, sorted, currentPage, totalPages, myRank, resolveNames);
     const newRow   = buildNavRow(currentPage, totalPages);
 
     await btn.update({ embeds: [newEmbed], components: [newRow] });
@@ -124,7 +130,30 @@ export async function execute(interaction) {
 // بناء Embed الصفحة
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function buildPageEmbed(interaction, sorted, page, totalPages, myRank) {
+/**
+ * ذاكرة مؤقتة لأسماء الأعضاء — تُمرَّر صفحة بصفحة
+ * تمنع تكرار members.fetch() لنفس العضو عند التنقل بين الصفحات
+ */
+function createNameResolver(interaction) {
+  const cache = new Map();
+
+  return async function resolveName(userId) {
+    if (cache.has(userId)) return cache.get(userId);
+
+    let name;
+    try {
+      const member = await interaction.guild.members.fetch(userId);
+      name = member.displayName;
+    } catch {
+      name = `<@${userId}>`;
+    }
+
+    cache.set(userId, name);
+    return name;
+  };
+}
+
+async function buildPageEmbed(interaction, sorted, page, totalPages, myRank, resolveNames) {
   const start = page * PAGE_SIZE;
   const slice = sorted.slice(start, start + PAGE_SIZE);
 
@@ -135,15 +164,8 @@ async function buildPageEmbed(interaction, sorted, page, totalPages, myRank) {
       const medal      = MEDALS[globalRank - 1] ?? `\`#${globalRank}\``;
       const isMe       = entry.userId === interaction.user.id;
 
-      // محاولة جلب اسم العضو
-      let name;
-      try {
-        const member = await interaction.guild.members.fetch(entry.userId);
-        name = member.displayName;
-      } catch {
-        // العضو غاب — نستخدم mention
-        name = `<@${entry.userId}>`;
-      }
+      // جلب اسم العضو (مخزّن مؤقتاً بين الصفحات)
+      const name = await resolveNames(entry.userId);
 
       const meTag  = isMe ? " **← أنت**" : "";
       const points = entry.total.toLocaleString("ar-SA");

@@ -139,11 +139,11 @@ function noPermEmbed(message) {
  * @param {object} payload - { embeds, components, ephemeral }
  */
 function safeRespond(interaction, payload) {
-  const { ephemeral, ...rest } = payload;
-
   if (interaction.replied || interaction.deferred) {
-    // editReply لا يقبل ephemeral — الرسالة تحتفظ بحالتها الأصلية
-    return interaction.editReply(rest).catch(() => {});
+    // editReply لا يقبل ephemeral — نزيله، والرسالة تحتفظ بحالتها الأصلية
+    const { ephemeral, ...editable } = payload;
+    void ephemeral;
+    return interaction.editReply(editable).catch(() => {});
   }
 
   return interaction.reply(payload).catch(() => {});

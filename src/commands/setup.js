@@ -25,6 +25,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   RoleSelectMenuBuilder,
+  StringSelectMenuBuilder,
   ChannelSelectMenuBuilder,
   ChannelType,
   ModalBuilder,
@@ -97,9 +98,6 @@ export async function execute(interaction) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildMainEmbed(config, guild) {
-  const check  = (val) => (val ? "✅" : "❌");
-  const rolesOk = config.modRoles?.length && config.adminRoles?.length;
-
   return new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle("📌 لوحة الإعدادات")
@@ -153,7 +151,7 @@ function buildMainEmbed(config, guild) {
       {
         name: "🏆 المراحل",
         value: config.milestones?.length
-          ? config.milestones
+          ? [...config.milestones]          // نسخة — sort() كانت تُعدّل الإعدادات نفسها
               .sort((a, b) => a.points - b.points)
               .map((m) => `<@&${m.roleId}> ← ${m.points.toLocaleString()} نقطة`)
               .join("\n")
@@ -267,6 +265,8 @@ async function handleRoles(i, config, interaction) {
       time:          60_000,
     });
   } catch {
+    // احفظ ما جُمع قبل انتهاء المهلة (الخطوتان الأخريان كانتا تحفظان وهذه لا)
+    saveConfig(interaction.guildId, config);
     return refreshMain(interaction, config);
   }
 
@@ -585,7 +585,7 @@ async function handleMilestones(i, config, interaction) {
           )
           .setValue(
             config.milestones?.length
-              ? config.milestones
+              ? [...config.milestones]      // نسخة — بدونها كان sort() يعدّل الإعدادات
                   .sort((a, b) => a.points - b.points)
                   .map((m) => `${m.points},${m.roleId}`)
                   .join("\n")
@@ -665,65 +665,97 @@ async function handleMilestones(i, config, interaction) {
 // ── القسم 6: قنوات السجل ─────────────────────────────────────────────────────
 
 async function handleLogChannels(i, config, interaction) {
-  // نجمع القنوات عبر modal لأن ChannelSelect لا يدعم 6 قنوات دفعة واحدة
-  // الحل: نطلب IDs مباشرة في modal
+  // ─── اختيار المجموعة ───────────────────────────────────────────────────────
+  // ديسكورد يسمح بـ 5 حقول كحد أقصى في الـ modal، وقنوات السجل 8 + قناة
+  // إعلانات الترقيات = 9 إعدادات. الحل: مجموعتان يختار المستخدم بينهما.
+  const groupRow = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("setup_logch_group")
+      .setPlaceholder("اختر مجموعة القنوات")
+      .addOptions([
+        {
+          label:       "📌 القنوات الأساسية",
+          description: "الكل • النقاط • الموديريشن • المراجعات • الترقيات",
+          value:       "basic",
+          emoji:       "📌",
+        },
+        {
+          label:       "🔧 القنوات المتقدمة",
+          description: "الاستئنافات • المهام • الإعدادات • إعلانات الترقيات",
+          value:       "advanced",
+          emoji:       "🔧",
+        },
+      ])
+  );
+
+  await i.update({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle("📢 قنوات السجل")
+        .setDescription(
+          "اختر المجموعة التي تريد تعديلها.\n\n" +
+          "**الأساسية:** الكل • النقاط • الموديريشن • المراجعات • الترقيات\n" +
+          "**المتقدمة:** الاستئنافات • المهام • الإعدادات • إعلانات الترقيات"
+        )
+        .setTimestamp(),
+    ],
+    components: [groupRow],
+  });
+
+  let groupInteraction;
+  try {
+    groupInteraction = await interaction.channel.awaitMessageComponent({
+      filter:        (c) => c.user.id === interaction.user.id && c.customId === "setup_logch_group",
+      componentType: ComponentType.StringSelect,
+      time:          60_000,
+    });
+  } catch {
+    return refreshMain(interaction, config);
+  }
+
+  const group = groupInteraction.values[0];
+
+  // ─── بناء الـ modal حسب المجموعة ───────────────────────────────────────────
+  const isBasic = group === "basic";
+
+  const fields = isBasic
+    ? [
+        ["log_all",        "سجل كامل (كل الأحداث)",          config.logChannels?.all],
+        ["log_points",     "سجل النقاط",                     config.logChannels?.points],
+        ["log_moderation", "سجل الموديريشن",                 config.logChannels?.moderation],
+        ["log_reviews",    "سجل المراجعات",                  config.logChannels?.reviews],
+        ["log_rewards",    "سجل الترقيات والمكافآت",         config.logChannels?.rewards],
+      ]
+    : [
+        ["log_appeals",   "سجل الاستئنافات",               config.logChannels?.appeals],
+        ["log_tasks",     "سجل المهام",                    config.logChannels?.tasks],
+        ["log_settings",  "سجل تغييرات الإعدادات",         config.logChannels?.settings],
+        ["promo_channel", "قناة إعلانات الترقيات (عامة)",  config.promotionAnnouncementChannel],
+      ];
 
   const modal = new ModalBuilder()
     .setCustomId("setup_logch_modal")
-    .setTitle("📢 قنوات السجل")
+    .setTitle(isBasic ? "📢 القنوات الأساسية" : "🔧 القنوات المتقدمة")
     .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("log_all")
-          .setLabel("سجل كامل (كل الأحداث) — channel ID")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(config.logChannels?.all || "")
-          .setPlaceholder("1234567890123456789")
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("log_points")
-          .setLabel("سجل النقاط — channel ID")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(config.logChannels?.points || "")
-          .setPlaceholder("1234567890123456789")
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("log_moderation")
-          .setLabel("سجل الموديريشن — channel ID")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(config.logChannels?.moderation || "")
-          .setPlaceholder("1234567890123456789")
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("log_rewards")
-          .setLabel("سجل الترقيات والمكافآت — channel ID")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(config.logChannels?.rewards || "")
-          .setPlaceholder("1234567890123456789")
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("promo_channel")
-          .setLabel("قناة إعلانات الترقيات (عامة) — channel ID")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(config.promotionAnnouncementChannel || "")
-          .setPlaceholder("1234567890123456789")
-      ),
+      fields.map(([customId, label, value]) =>
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId(customId)
+            .setLabel(`${label} — channel ID`)
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setValue(value || "")
+            .setPlaceholder("1234567890123456789")
+        )
+      )
     );
 
-  await i.showModal(modal);
+  await groupInteraction.showModal(modal);
 
   let modalSubmit;
   try {
-    modalSubmit = await i.awaitModalSubmit({
+    modalSubmit = await groupInteraction.awaitModalSubmit({
       filter: (m) => m.user.id === interaction.user.id && m.customId === "setup_logch_modal",
       time:   120_000,
     });
@@ -733,36 +765,36 @@ async function handleLogChannels(i, config, interaction) {
 
   // دالة للتحقق من صحة الـ ID (أو إفراغه)
   const parseId = (raw) => {
-    const val = raw.trim();
+    const val = (raw ?? "").trim();
     return val.length >= 17 ? val : null;
   };
 
-  const all        = parseId(modalSubmit.fields.getTextInputValue("log_all"));
-  const points     = parseId(modalSubmit.fields.getTextInputValue("log_points"));
-  const moderation = parseId(modalSubmit.fields.getTextInputValue("log_moderation"));
-  const rewards    = parseId(modalSubmit.fields.getTextInputValue("log_rewards"));
-  const promoCh    = parseId(modalSubmit.fields.getTextInputValue("promo_channel"));
-
   // ─── دمج بدل الاستبدال ────────────────────────────────────────────────────
-  // الاستبدال الكامل كان يمسح مفاتيح appeals / tasks / settings
-  // التي لا تظهر في هذا الـ modal (Discord يسمح بـ 5 حقول فقط)
-  config.logChannels = {
-    ...(config.logChannels || {}),
-    all,
-    points,
-    moderation,
-    rewards,
-  };
+  // الاستبدال الكامل كان يمسح المفاتيح التي لا تظهر في هذه المجموعة
+  const updates = {};
+  for (const [customId] of fields) {
+    const rawValue = parseId(modalSubmit.fields.getTextInputValue(customId));
 
-  // قناة إعلانات الترقيات منفصلة تماماً عن قنوات السجل
-  config.promotionAnnouncementChannel = promoCh;
+    // الحقول التي تبدأ بـ log_ تذهب لـ logChannels، والبقية لإعدادات عامة
+    if (customId === "promo_channel") {
+      config.promotionAnnouncementChannel = rawValue;
+    } else {
+      updates[customId.replace("log_", "")] = rawValue;
+    }
+  }
+
+  config.logChannels = { ...(config.logChannels || {}), ...updates };
 
   saveConfig(interaction.guildId, config);
+
+  const summary = Object.entries(updates)
+    .map(([k, v]) => `${k}:${v ?? "-"}`)
+    .join(" ");
+
   await logChange(
     interaction,
-    "📢 قنوات السجل",
-    `all:${all ?? "-"} points:${points ?? "-"} moderation:${moderation ?? "-"} ` +
-    `rewards:${rewards ?? "-"} promo:${promoCh ?? "-"}`,
+    isBasic ? "📢 القنوات الأساسية" : "🔧 القنوات المتقدمة",
+    summary + (isBasic ? "" : ` promo:${config.promotionAnnouncementChannel ?? "-"}`),
   );
 
   await modalSubmit.deferUpdate();

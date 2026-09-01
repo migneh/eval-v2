@@ -17,7 +17,6 @@ import {
   StringSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ComponentType,
 } from "discord.js";
 
 import { getConfig }          from "../utils/db.js";

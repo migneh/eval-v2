@@ -19,7 +19,6 @@ import {
 } from "../utils/db.js";
 import { isMod }           from "../utils/perms.js";
 import { checkPromotion }  from "./promotions.js";
-import { log, makeLogEmbed, LogType } from "../utils/logger.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // الدالة الرئيسية
@@ -103,7 +102,8 @@ export async function handleXp(message) {
 
   // ─── تسجيل في السجل (اختياري — معلّق لتفادي الفيضان) ────────────────────────
   // XP يُعطى بكثرة، لو سجّلنا كل مرة ستمتلئ قناة السجل بسرعة
-  // فعّله فقط لو أردت تتبع دقيق:
+  // لتفعيله: أعد استيراد { log, makeLogEmbed, LogType } من "../utils/logger.js"
+  // ثم فعّل هذا الكود:
   //
   // await log(guild, LogType.POINTS_ADD, makeLogEmbed(LogType.POINTS_ADD, "💬 XP مكتسب", [
   //   { name: "المشرف", value: `<@${userId}>`, inline: true },

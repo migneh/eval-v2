@@ -20,7 +20,6 @@ import {
   getConfig,
   getUserPoints,
   getPromotions,
-  savePromotions,
   addPromotionEntry,
 } from "../utils/db.js";
 

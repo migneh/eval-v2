@@ -114,7 +114,6 @@ async function handleSetup(interaction) {
   }
 
   const selectedRoleId = roleInteraction.values[0];
-  const selectedRole   = interaction.guild.roles.cache.get(selectedRoleId);
 
   // ─── الخطوة 2: اختيار النوع والفترة ──────────────────────────────────────────
   const typeRow = new ActionRowBuilder().addComponents(
