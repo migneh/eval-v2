@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { REST, Routes } from "discord.js";
+import { loadConfig } from "./utils/config-loader.js";
 
 // ─── استيراد data كل أمر ─────────────────────────────────────────────────────
 import * as addCmd        from "./commands/add.js";
@@ -22,27 +23,10 @@ import * as memblogCmd    from "./commands/memberlog.js";
 import * as mytasksCmd    from "./commands/mytasks.js";
 import * as taskCmd       from "./commands/task.js";
 
-// ─── تحميل config.js ─────────────────────────────────────────────────────────
-let token, clientId;
-
-try {
-  const cfg = await import("../config.js");
-  token    = cfg.default.token;
-  clientId = cfg.default.clientId;
-
-  if (!token || token === "ضع_توكن_البوت_هنا") {
-    throw new Error("التوكن غير صالح — عدّل config.js أولاً");
-  }
-  if (!clientId || clientId === "ضع_client_id_هنا") {
-    throw new Error("الـ clientId غير صالح — عدّل config.js أولاً");
-  }
-} catch (err) {
-  console.error("─────────────────────────────────────────");
-  console.error("❌ خطأ في config.js:", err.message);
-  console.error("📋 الحل: انسخ config.example.js إلى config.js وعدّل القيم");
-  console.error("─────────────────────────────────────────");
-  process.exit(1);
-}
+// ─── تحميل الإعدادات ──────────────────────────────────────────────────────────
+// deploy.js يحتاج clientId لأنه يسجّل الأوامر في Discord API
+const { token, clientId, source } = await loadConfig({ requireClientId: true });
+console.log(`🔧 مصدر الإعدادات: ${source}`);
 
 // ─── تجميع الـ data ───────────────────────────────────────────────────────────
 // كل أمر يجب أن يُحوَّل إلى JSON خام قبل الإرسال لـ Discord API

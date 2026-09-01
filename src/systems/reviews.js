@@ -24,9 +24,6 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
 } from "discord.js";
 
 import {
@@ -217,6 +214,62 @@ export async function createReview(guild, data) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// منح النقاط مباشرة (بدون مراجعة)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * يمنح المشرف نقاط العقوبة فوراً بدون انتظار مراجع
+ *
+ * متى يُستخدم؟
+ *   عندما لا تكون هناك قناة مراجعة مُعدَّة — حينها createReview() يُرجع null
+ *   ولا يوجد أحد ليقبل الطلب، فتضيع نقاط المشرف بالكامل بصمت.
+ *   هذا خطأ في العدالة: العقوبة نُفِّذت فعلاً والمشرف قام بعمله.
+ *
+ * @param {Guild}  guild
+ * @param {object} data - { type, executorId, targetId, reason, duration? }
+ * @returns {Promise<number>} - النقاط الممنوحة
+ */
+export async function awardWithoutReview(guild, data) {
+  const config = getConfig(guild.id);
+  const points = calcExpectedPoints({ type: data.type, duration: data.duration }, config);
+
+  addPointsToUser(
+    guild.id,
+    data.executorId,
+    points,
+    "moderation",
+    `عقوبة مباشرة (بدون مراجعة): ${data.type === "warn" ? "تحذير" : "تايم أوت"}`,
+    null,
+  );
+
+  addMemberLogEntry(guild.id, data.targetId, {
+    type:       data.type,
+    duration:   data.duration ?? null,
+    reason:     data.reason || "لا يوجد سبب",
+    executorId: data.executorId,
+    reviewerId: null,
+    result:     "مقبولة تلقائياً (لا توجد قناة مراجعة)",
+  });
+
+  await log(guild, LogType.MODERATION, makeLogEmbed(LogType.MODERATION,
+    "⚡ عقوبة بلا مراجعة — أُضيفت النقاط مباشرة",
+    [
+      { name: "المشرف",  value: `<@${data.executorId}>`, inline: true },
+      { name: "العضو",   value: `<@${data.targetId}>`,   inline: true },
+      { name: "النقاط",  value: `+${points}`,            inline: true },
+      {
+        name:  "⚠️ السبب",
+        value: "لا توجد قناة مراجعة مُعدَّة. أضفها من `/setup` لتفعيل نظام المراجعة.",
+      },
+    ]
+  ));
+
+  await checkPromotion(guild, data.executorId);
+
+  return points;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // إنشاء استئناف
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -347,6 +400,8 @@ export async function acceptReview(guild, reviewId, reviewerId) {
   const points = calcExpectedPoints(review, config);
 
   // ─── تحديث الطلب ─────────────────────────────────────────────────────────────
+  clearReminder(guild.id, reviewId);
+
   review.status     = "accepted";
   review.reviewerId = reviewerId;
   review.reviewedAt = Date.now();
@@ -375,6 +430,13 @@ export async function acceptReview(guild, reviewId, reviewerId) {
     reviewerId,
     result:     review.isAppeal ? "قُبل الاستئناف" : "مقبولة",
   });
+
+  // ─── إعادة تطبيق العقوبة (عند قبول استئناف) ────────────────────────────────
+  // عند رفض عقوبة تايم أوت يزيلها rejectReview() عن العضو.
+  // إذا قُبل الاستئناف لاحقاً يجب إعادتها — وإلا يستفيد العضو من التأخير فقط.
+  if (review.isAppeal && review.type === "timeout" && review.duration) {
+    await reapplyTimeout(guild, review);
+  }
 
   // ─── تحديث بطاقة المراجعة ────────────────────────────────────────────────────
   await updateReviewMessage(guild, review, {
@@ -430,6 +492,8 @@ export async function rejectReview(guild, reviewId, reviewerId, rejectReason = "
   const canAppeal = review.appealNumber < MAX_APPEALS;
 
   // ─── تحديث الطلب ─────────────────────────────────────────────────────────────
+  clearReminder(guild.id, reviewId);
+
   review.status       = "rejected";
   review.reviewerId   = reviewerId;
   review.reviewedAt   = Date.now();
@@ -512,6 +576,30 @@ function calcExpectedPoints(review, config) {
     : 0;
 
   return base + (perHour * hours);
+}
+
+/**
+ * يُعيد تطبيق التوقيف على العضو بعد قبول استئناف
+ * يفشل بصمت إذا غادر العضو أو كان البوت أقل رتبة
+ *
+ * @param {Guild}  guild
+ * @param {object} review
+ */
+async function reapplyTimeout(guild, review) {
+  try {
+    const targetMember = await guild.members.fetch(review.targetId);
+    const durationMs   = review.duration * 60 * 1000;
+
+    await targetMember.timeout(
+      durationMs,
+      `إعادة توقيف بعد قبول الاستئناف — ${review.reason || "لا يوجد سبب"}`,
+    );
+  } catch (err) {
+    console.error(
+      `❌ تعذّر إعادة التوقيف للعضو ${review.targetId} (طلب ${review.id}):`,
+      err.message,
+    );
+  }
 }
 
 /**
@@ -608,6 +696,58 @@ async function notifyExecutor(
   }
 }
 
+// مؤقتات التذكير النشطة: `${guildId}:${reviewId}` → Timeout
+// نحتفظ بالمرجع لنتمكن من الإلغاء وإعادة الجدولة
+const reminderTimers = new Map();
+
+/**
+ * يُلغي مؤقت تذكير معلّق لطلب معين
+ *
+ * @param {string} guildId
+ * @param {string} reviewId
+ */
+function clearReminder(guildId, reviewId) {
+  const key = `${guildId}:${reviewId}`;
+  const t   = reminderTimers.get(key);
+  if (t) {
+    clearTimeout(t);
+    reminderTimers.delete(key);
+  }
+}
+
+/**
+ * يُعيد جدولة تذكيرات الطلبات المعلّقة بعد إعادة تشغيل البوت
+ *
+ * المشكلة التي يحلّها:
+ *   setTimeout كان في الذاكرة فقط — أي إعادة تشغيل تُفقد كل التذكيرات المعلّقة،
+ *   فتبقى الطلبات بلا مراجعة لأيام دون أي تنبيه.
+ *   الآن نحفظ remindAt داخل الطلب ونعيد بناء المؤقتات عند الإقلاع.
+ *
+ * يُستدعى من حدث ready في index.js
+ *
+ * @param {Guild} guild
+ * @returns {number} - عدد التذكيرات التي أُعيدت جدولتها
+ */
+export function rescheduleReminders(guild) {
+  const reviews = getReviews(guild.id);
+  const now     = Date.now();
+  let   count   = 0;
+
+  for (const review of Object.values(reviews)) {
+    if (review.status !== "pending") continue;
+
+    const delay = (review.remindAt ?? 0) - now;
+
+    // وقت التذكير مضى أثناء الإطفاء — لا نُرسل تنبيهاً متأخراً بلا معنى
+    if (delay <= 0) continue;
+
+    scheduleReminder(guild, review.id, review.channelId, !!review.isAppeal, delay);
+    count++;
+  }
+
+  return count;
+}
+
 /**
  * يُجدول تنبيه تأخر المراجعة بعد ساعة
  * إذا بقي الطلب pending لأكثر من ساعة → يُرسل ping في القناة
@@ -616,9 +756,16 @@ async function notifyExecutor(
  * @param {string}  reviewId
  * @param {string}  channelId
  * @param {boolean} isAppeal    - هل هو استئناف؟
+ * @param {number}  [delayMs]   - التأخير (افتراضياً ساعة) — يُمرَّر عند إعادة الجدولة
  */
-function scheduleReminder(guild, reviewId, channelId, isAppeal) {
-  setTimeout(async () => {
+function scheduleReminder(guild, reviewId, channelId, isAppeal, delayMs = REMINDER_DELAY_MS) {
+  const key = `${guild.id}:${reviewId}`;
+
+  // ألغِ أي مؤقت سابق لهذا الطلب (مهم: الاستئناف يُعيد استخدام نفس المعرّف)
+  clearReminder(guild.id, reviewId);
+
+  const timer = setTimeout(async () => {
+    reminderTimers.delete(key);
     try {
       const reviews = getReviews(guild.id);
       const review  = reviews[reviewId];
@@ -644,7 +791,19 @@ function scheduleReminder(guild, reviewId, channelId, isAppeal) {
     } catch {
       // السيرفر أو القناة غير متاحة
     }
-  }, REMINDER_DELAY_MS);
+  }, delayMs);
+
+  // لا يمنع المؤقت إيقاف عملية Node
+  timer.unref?.();
+
+  reminderTimers.set(key, timer);
+
+  // احفظ وقت التذكير في الطلب ليُعاد بناؤه بعد إعادة التشغيل
+  const reviews = getReviews(guild.id);
+  if (reviews[reviewId]) {
+    reviews[reviewId].remindAt = Date.now() + delayMs;
+    saveReviews(guild.id, reviews);
+  }
 }
 
 /**
@@ -662,6 +821,36 @@ function generateReviewId() {
 // ─────────────────────────────────────────────────────────────────────────────
 // دوال استعلام مُصدَّرة
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * يحذف الطلبات القديمة المحسومة ( non-pending ) لتفادي نمو الملف بلا حد
+ *
+ * الطلبات **المعلّقة لا تُحذف أبداً** — ما زالت تحتاج مراجعة.
+ *
+ * @param {string} guildId
+ * @param {number} [maxAgeMs] - عمر الطلب الأقصى (افتراضي 90 يوماً)
+ * @returns {number}          - عدد الطلبات المحذوفة
+ */
+export function pruneReviews(guildId, maxAgeMs = 90 * 24 * 60 * 60 * 1000) {
+  const reviews = getReviews(guildId);
+  const now     = Date.now();
+  let   removed = 0;
+
+  for (const [id, review] of Object.entries(reviews)) {
+    // لا تلمس المعلّقة
+    if (review.status === "pending") continue;
+
+    if (now - (review.createdAt || 0) > maxAgeMs) {
+      clearReminder(guildId, id);
+      delete reviews[id];
+      removed++;
+    }
+  }
+
+  if (removed) saveReviews(guildId, reviews);
+
+  return removed;
+}
 
 /**
  * يُرجع كل الطلبات المعلّقة مرتبة حسب الأولوية

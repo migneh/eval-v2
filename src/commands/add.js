@@ -28,11 +28,8 @@ import { getConfig, addPointsToUser, getUserPoints } from "../utils/db.js";
 import { requireAdmin, requireNotSelf }              from "../utils/perms.js";
 import { log, makeLogEmbed, LogType }                from "../utils/logger.js";
 import { checkPromotion }                            from "../systems/promotions.js";
-
-// ─── Anti-Abuse Cooldown Store ────────────────────────────────────────────────
-// Map<"guildId:userId" → timestamp>
-// يُخزَّن في الذاكرة — يُصفَّر عند إعادة تشغيل البوت
-const abuseCooldowns = new Map();
+import { getCooldownLeft, setCooldown }              from "../utils/cooldown.js";
+import { parsePositiveInt }                          from "../utils/validate.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تعريف الأمر
@@ -60,10 +57,10 @@ export async function execute(interaction) {
   if (!requireAdmin(interaction, config)) return;
 
   // ─── 2. فحص Anti-Abuse Cooldown ──────────────────────────────────────────────
-  const abKey       = `${interaction.guildId}:${interaction.user.id}`;
+  // مشترك مع /remove — لا يمكن التحايل عليه بتبديل الأمر
+  const abKey        = `${interaction.guildId}:${interaction.user.id}`;
   const abCooldownMs = (config.limits?.abuseCooldown ?? 30) * 1000;
-  const lastUsed    = abuseCooldowns.get(abKey) || 0;
-  const cooldownLeft = abCooldownMs - (Date.now() - lastUsed);
+  const cooldownLeft = getCooldownLeft("abuse", abKey) * 1000;
 
   if (cooldownLeft > 0) {
     return interaction.reply({
@@ -129,8 +126,17 @@ export async function execute(interaction) {
 
   const selectedUsers = selectInteraction.values;
 
+  // ─── أقرّ باستلام الاختيار أولاً ─────────────────────────────────────────────
+  // بدون deferUpdate يظهر للمستخدم "This interaction failed" لأن ديسكورد
+  // ينتظر رداً خلال 3 ثوانٍ على أي تفاعل مكوّنات
+  await selectInteraction.deferUpdate().catch(() => {});
+
   // ─── فحص: لا يضيف لنفسه ──────────────────────────────────────────────────────
-  if (!requireNotSelf(selectInteraction, selectedUsers)) return;
+  if (!requireNotSelf(interaction, selectedUsers)) {
+    // أزل القائمة من الرسالة الأصلية حتى لا تبقى معلّقة
+    await interaction.editReply({ components: [] }).catch(() => {});
+    return;
+  }
 
   // ─── 5. Modal — كتابة عدد النقاط ─────────────────────────────────────────────
   const modal = new ModalBuilder()
@@ -166,26 +172,19 @@ export async function execute(interaction) {
   }
 
   // ─── تحقق من صحة المدخل ──────────────────────────────────────────────────────
-  const rawAmount = modalSubmit.fields.getTextInputValue("points_amount").trim();
-  const amount    = parseInt(rawAmount);
+  // parsePositiveInt ترفض "100abc" و "12.5" و "1e3" التي كان parseInt يقبلها
+  const rawAmount = modalSubmit.fields.getTextInputValue("points_amount");
+  const amount    = parsePositiveInt(rawAmount, { max: maxAdd });
 
-  if (isNaN(amount) || amount <= 0 || !Number.isInteger(amount)) {
+  if (amount == null) {
     return modalSubmit.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0xed4245)
-          .setDescription("❌ عدد النقاط يجب أن يكون رقماً صحيحاً موجباً.")
-      ],
-      ephemeral: true,
-    });
-  }
-
-  if (amount > maxAdd) {
-    return modalSubmit.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xed4245)
-          .setDescription(`❌ الحد الأقصى للإضافة هو **${maxAdd} نقطة** في العملية الواحدة.`)
+          .setDescription(
+            `❌ عدد النقاط يجب أن يكون رقماً صحيحاً موجباً (بدون فواصل أو حروف).\n` +
+            `المدى المسموح: **1 — ${maxAdd}**`
+          )
       ],
       ephemeral: true,
     });
@@ -255,7 +254,7 @@ export async function execute(interaction) {
   }
 
   // ─── 7. تطبيق النقاط ─────────────────────────────────────────────────────────
-  abuseCooldowns.set(abKey, Date.now());
+  setCooldown("abuse", abKey, abCooldownMs);
 
   const results = [];
   for (const userId of selectedUsers) {

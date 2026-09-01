@@ -124,6 +124,32 @@ function noPermEmbed(message) {
 }
 
 /**
+ * يُرسل رداً بأمان بغض النظر عن حالة التفاعل
+ *
+ * المشكلة التي يحلّها:
+ *   في تدفقات متعددة الخطوات (مثل /add: أمر → UserSelect → Modal → زر تأكيد)
+ *   يكون التفاعل الأصلي قد رُدّ عليه مسبقاً.Calling reply() مرة ثانية
+ *   يرمي "Interaction has already been acknowledged" ويُسقط الأمر كاملاً.
+ *
+ * القاعدة:
+ *   • لم يُرد بعد           → reply()
+ *   • رُدّ أو أُجِّل         → editReply() (يُحدّث الرسالة الأصلية)
+ *
+ * @param {CommandInteraction} interaction
+ * @param {object} payload - { embeds, components, ephemeral }
+ */
+function safeRespond(interaction, payload) {
+  if (interaction.replied || interaction.deferred) {
+    // editReply لا يقبل ephemeral — نزيله، والرسالة تحتفظ بحالتها الأصلية
+    const { ephemeral, ...editable } = payload;
+    void ephemeral;
+    return interaction.editReply(editable).catch(() => {});
+  }
+
+  return interaction.reply(payload).catch(() => {});
+}
+
+/**
  * تحقق من صلاحية المدير — إذا لم تتوفر يُرسل رسالة ويُعيد false
  *
  * @param {CommandInteraction} interaction
@@ -136,10 +162,10 @@ function noPermEmbed(message) {
 export function requireAdmin(interaction, config) {
   if (isAdmin(interaction.member, config)) return true;
 
-  interaction.reply({
+  safeRespond(interaction, {
     embeds: [noPermEmbed("ليس لديك صلاحية استخدام هذا الأمر.\nتحتاج رتبة إدارة أو Administrator.")],
     ephemeral: true,
-  }).catch(() => {});
+  });
 
   return false;
 }
@@ -157,10 +183,10 @@ export function requireAdmin(interaction, config) {
 export function requireMod(interaction, config) {
   if (isMod(interaction.member, config)) return true;
 
-  interaction.reply({
+  safeRespond(interaction, {
     embeds: [noPermEmbed("ليس لديك صلاحية استخدام هذا الأمر.\nتحتاج رتبة مشرف على الأقل.")],
     ephemeral: true,
-  }).catch(() => {});
+  });
 
   return false;
 }
@@ -175,10 +201,10 @@ export function requireMod(interaction, config) {
 export function requireAppealReviewer(interaction, config) {
   if (isAppealReviewer(interaction.member, config)) return true;
 
-  interaction.reply({
+  safeRespond(interaction, {
     embeds: [noPermEmbed("ليس لديك صلاحية مراجعة الاستئنافات النهائية.")],
     ephemeral: true,
-  }).catch(() => {});
+  });
 
   return false;
 }
@@ -210,10 +236,10 @@ export function isSelfAction(executorId, targetIds) {
 export function requireNotSelf(interaction, targetIds) {
   if (!isSelfAction(interaction.user.id, targetIds)) return true;
 
-  interaction.reply({
+  safeRespond(interaction, {
     embeds: [noPermEmbed("لا يمكنك تعديل نقاطك بنفسك.\nهذا مقيّد حتى على المالك والمديرين.")],
     ephemeral: true,
-  }).catch(() => {});
+  });
 
   return false;
 }

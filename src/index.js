@@ -12,6 +12,9 @@ import {
 
 import { handleMessageCreate } from "./events/messageCreate.js";
 import { handleInteractionCreate } from "./events/interactionCreate.js";
+import { incrementTaskProgress, checkExpiredTasks } from "./systems/tasks.js";
+import { rescheduleReminders, pruneReviews } from "./systems/reviews.js";
+import { loadConfig } from "./utils/config-loader.js";
 
 // ─── استيراد الأوامر ──────────────────────────────────────────────────────────
 import * as addCmd        from "./commands/add.js";
@@ -29,27 +32,10 @@ import * as memblogCmd    from "./commands/memberlog.js";
 import * as mytasksCmd    from "./commands/mytasks.js";
 import * as taskCmd       from "./commands/task.js";
 
-// ─── تحميل config.js ─────────────────────────────────────────────────────────
-let token, clientId;
-
-try {
-  const cfg = await import("../config.js");
-  token    = cfg.default.token;
-  clientId = cfg.default.clientId;
-
-  if (!token || token === "ضع_توكن_البوت_هنا") {
-    throw new Error("التوكن غير صالح");
-  }
-  if (!clientId || clientId === "ضع_client_id_هنا") {
-    throw new Error("الـ clientId غير صالح");
-  }
-} catch (err) {
-  console.error("─────────────────────────────────────────");
-  console.error("❌ خطأ في config.js:", err.message);
-  console.error("📋 الحل: انسخ config.example.js إلى config.js وعدّل القيم");
-  console.error("─────────────────────────────────────────");
-  process.exit(1);
-}
+// ─── تحميل الإعدادات ──────────────────────────────────────────────────────────
+// index.js لا يحتاج clientId — التوكن يكفي لتشغيل البوت
+const { token } = await loadConfig({ requireClientId: false });
+console.log("🔧 مصدر الإعدادات: تم تحميل التوكن بنجاح");
 
 // ─── إنشاء الـ Client ─────────────────────────────────────────────────────────
 const client = new Client({
@@ -121,6 +107,25 @@ client.once("ready", (c) => {
     activities: [{ name: "/help | إدارة النقاط", type: 0 }],
     status: "online",
   });
+
+  // ─── استعادة التذكيرات المعلّقة بعد إعادة التشغيل ──────────────────────────
+  // كانت المؤقتات في الذاكرة فقط فتضيع مع كل إعادة تشغيل
+  (async () => {
+    let restored = 0;
+    let pruned   = 0;
+
+    for (const guild of c.guilds.cache.values()) {
+      try {
+        restored += rescheduleReminders(guild);
+        pruned   += pruneReviews(guild.id);
+      } catch (err) {
+        console.error(`❌ خطأ في استعادة تذكيرات ${guild.id}:`, err.message);
+      }
+    }
+
+    if (restored) console.log(`🔔 تم استعادة ${restored} تذكير مراجعة معلّق`);
+    if (pruned)   console.log(`🧹 تم أرشفة ${pruned} طلب مراجعة قديم`);
+  })();
 });
 
 // ─── حدث: رسالة جديدة (XP + تقدم المهام) ────────────────────────────────────
@@ -166,8 +171,8 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     voiceSessions.delete(key);
 
     if (minutes > 0) {
-      // استيراد ديناميكي لتجنب الدورة الدائرية
-      const { incrementTaskProgress } = await import("./systems/tasks.js");
+      // استيراد ثابت في الأعلى — لا توجد دورة دائرية لأن tasks.js
+      // لا يستورد index.js إطلاقاً
       await incrementTaskProgress(guild, userId, "voice", minutes).catch(() => {});
     }
 
@@ -178,15 +183,77 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
+// ─── حدث: مغادرة عضو → نظّف جلسة الفويس المعلّقة ────────────────────────────
+client.on("guildMemberRemove", (member) => {
+  voiceSessions.delete(`${member.guild.id}:${member.id}`);
+});
+
+// ─── حدث: مغادرة البوت لسيرفر → نظّف كل جلساته ──────────────────────────────
+client.on("guildDelete", (guild) => {
+  for (const key of voiceSessions.keys()) {
+    if (key.startsWith(`${guild.id}:`)) voiceSessions.delete(key);
+  }
+});
+
+// ─── فحص دوري: المهام المنتهية (كل ساعة) ─────────────────────────────────────
+// checkExpiredTasks كان معطّلاً تماماً — لا أحد يستدعيه، ومهام الفويس
+// والأسبوعية كانت تنتهي بصمت بدون إشعار
+const HOUR_MS = 60 * 60 * 1000;
+
+const taskCheckTimer = setInterval(async () => {
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      await checkExpiredTasks(guild);
+
+      // تنظيف دوري — يمنع نمو reviews.json بلا حد
+      const removed = pruneReviews(guild.id);
+      if (removed) {
+        console.log(`🧹 أُرشف ${removed} طلب قديم في ${guild.name}`);
+      }
+    } catch (err) {
+      console.error(`❌ خطأ في الفحص الدوري (${guild.id}):`, err.message);
+    }
+  }
+}, HOUR_MS);
+
+// لا تمنع الـ timer من إيقاف عملية Node إذا لم يبقَ شيء آخر
+taskCheckTimer.unref?.();
+
 // ─── معالجة الأخطاء غير المتوقعة ─────────────────────────────────────────────
 process.on("unhandledRejection", (err) => {
+  // نتوقّع كثيراً من هذه (صلاحيات مفقودة، رسائل محذوفة) — نسجّل ونكمل
   console.error("❌ unhandledRejection:", err);
 });
 
 process.on("uncaughtException", (err) => {
+  // استثناء غير متزامن خارج أي try/catch = البوت في حالة غير متوقّعة.
+  // المتابعة كانت تُبقي البوت يعمل بحالة تالفة بصمت — الأفضل
+  // تسجيل الخطأ ثم الخروج ليُعيد المشرف (PM2 / systemd / Docker) تشغيله نظيفاً.
   console.error("❌ uncaughtException:", err);
-  // لا نوقف البوت — نسجّل الخطأ فقط
+  console.error("⏹ سيتم إيقاف البوت. سيُعاد تشغيله تلقائياً إن كنت تستخدم مشرف عمليات.");
+
+  client.destroy();
+  process.exit(1);
 });
+
+// ─── إيقاف نظيف عند Ctrl+C أو إشارة الإيقاف ──────────────────────────────────
+async function shutdown(signal) {
+  console.log(`\n🛑 استلام ${signal} — جاري إيقاف البوت...`);
+
+  clearInterval(taskCheckTimer);
+
+  try {
+    client.destroy();
+    console.log("✅ تم قطع الاتصال بديسكورد.");
+  } catch {
+    // تجاهل
+  }
+
+  process.exit(0);
+}
+
+process.on("SIGINT",  () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // ─── تسجيل الدخول ────────────────────────────────────────────────────────────
 await client.login(token);

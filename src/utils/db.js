@@ -6,8 +6,20 @@
 
 import fs   from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const DATA_DIR = "./data";
+// ─── مسار مجلد البيانات ───────────────────────────────────────────────────────
+// كان "./data" — مسار نسبي يعتمد على مجلد التشغيل (cwd).
+// تشغيل `node /app/src/index.js` من مجلد آخر يخلق مجلد بيانات جديداً فارغاً
+// ويبدو وكأن كل نقاط المشرفين اختفت.
+// الحل: مسار مشتق من موقع هذا الملف نفسه (جذر المشروع/../)
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),  // src/utils
+  "..",                                           // src
+  "..",                                           // جذر المشروع
+);
+
+const DATA_DIR = path.join(PROJECT_ROOT, "data");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // أدوات مساعدة داخلية
@@ -24,25 +36,107 @@ function guildDir(guildId) {
   return dir;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ذاكرة مؤقتة للقراءة
+// ─────────────────────────────────────────────────────────────────────────────
+// المشكلة: addPointsToUser() كانت تقرأ نفس الملف مرتين من القرص
+// (مرة عبر getUserPoints ومرة داخل saveUserPoints Save) ثم تكتبه.
+// في سيرفر نشط = آلاف قراءات القرص في الدقيقة لنفس الملف.
+//
+// الحل: نُبقي نسخة في الذاكرة بعد أول قراءة، ونحدّثها عند كل كتابة.
+// آمن لأن Node أحادي الخيط ولا يوجد await بين القراءة والكتابة،
+// ولا يوجد أي عملية خارجية تُعدّل هذه الملفات.
+const readCache = new Map();   // filePath → parsed data
+
+/**
+ * يُفرغ الذاكرة المؤقتة (للاختبار أو بعد تعديل يدوي للملفات)
+ */
+export function clearCache() {
+  readCache.clear();
+}
+
+/**
+ * يُرجع إحصاءات الذاكرة المؤقتة
+ */
+export function cacheStats() {
+  return { entries: readCache.size };
+}
+
 /**
  * يقرأ ملف JSON ويُرجع محتواه أو القيمة الافتراضية عند الخطأ
+ *
+ * عند تلف الملف: يحفظ نسخة منه قبل الرجوع للقيمة الافتراضية،
+ * لأن الرجوع الصامت كان يعني فقدان بيانات السيرفر بالكامل عند أول حفظ تالٍ.
  */
 function readJSON(filePath, defaultValue = {}) {
+  // أرجع النسخة المحفوظة في الذاكرة إن وُجدت
+  if (readCache.has(filePath)) return readCache.get(filePath);
+
+  let data;
+
   try {
-    if (!fs.existsSync(filePath)) return defaultValue;
+    if (!fs.existsSync(filePath)) {
+      data = defaultValue;
+      readCache.set(filePath, data);
+      return data;
+    }
+
     const raw = fs.readFileSync(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    // الملف تالف أو فارغ → ارجع بالقيمة الافتراضية
-    return defaultValue;
+
+    // ملف فارغ (نتيجة كتابة توقفت في منتصفها) — تعامله كملف تالف
+    if (raw.trim() === "") throw new Error("ملف فارغ");
+
+    data = JSON.parse(raw);
+    readCache.set(filePath, data);
+    return data;
+  } catch (err) {
+    console.error(`❌ ملف بيانات تالف: ${filePath} — ${err.message}`);
+
+    // احفظ الأدلة قبل الرجوع للقيمة الافتراضية
+    try {
+      if (fs.existsSync(filePath)) {
+        const backup = `${filePath}.corrupt-${Date.now()}`;
+        fs.copyFileSync(filePath, backup);
+        console.error(`💾 تم حفظ نسخة من الملف التالف في: ${backup}`);
+      }
+    } catch {
+      // لا نستطيع حفظ نسخة — على الأقل سجّلنا الخطأ
+    }
+
+    data = defaultValue;
+    readCache.set(filePath, data);
+    return data;
   }
 }
 
 /**
- * يكتب بيانات كـ JSON منسّق في الملف
+ * يكتب بيانات كـ JSON منسّق في الملف — **بشكل ذري**
+ *
+ * لماذا الذرية مهمة؟
+ *   writeFileSync يفرّغ الملف أولاً ثم يكتب. إذا توقفت العملية بينهما
+ *   (انقطاع كهرباء، إعادة تشغيل، crash) يبقى الملف فارغاً أو ناقصاً،
+ *   وreadJSON يرجّع {} بصمت → تضيع نقاط كل المشرفين في السيرفر.
+ *
+ * الحل: نكتب في ملف مؤقت ثم نبدّله بالأصلي (rename عملية ذرية).
  */
 function writeJSON(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+  const tmpPath = `${filePath}.tmp`;
+
+  // حدّث الذاكرة المؤقتة أولاً — حتى لو فشلت الكتابة تبقى الحالة متسقة في الذاكرة
+  readCache.set(filePath, data);
+
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    // نظّف الملف المؤقت حتى لا يتراكم
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {
+      // تجاهل
+    }
+    throw err;
+  }
 }
 
 /**

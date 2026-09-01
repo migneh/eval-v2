@@ -7,8 +7,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { EmbedBuilder } from "discord.js";
-import { getConfig }    from "../utils/db.js";
-import { isAdmin }      from "../utils/perms.js";
+import { getConfig, getReviews } from "../utils/db.js";
+import { isAdmin, isAppealReviewer } from "../utils/perms.js";
 import {
   acceptReview,
   rejectReview,
@@ -96,7 +96,7 @@ async function handleSlashCommand(interaction, commands) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleButton(interaction) {
-  const { customId, guild, member, user } = interaction;
+  const { customId } = interaction;
 
   // ─── أزرار المراجعة ────────────────────────────────────────────────────────
   // customId الشكل: "review_accept:REVIEW_ID" أو "review_reject:REVIEW_ID"
@@ -140,9 +140,27 @@ async function handleReviewButton(interaction) {
   // ─── تحقق من الصلاحية ────────────────────────────────────────────────────────
   const config = getConfig(guild.id);
 
-  if (!isAdmin(member, config)) {
+  // جلب الطلب قبل الفحص — الاستئناف الثاني له قاعدة صلاحية مختلفة
+  const reviewForPerm = getReviews(guild.id)[reviewId];
+
+  // ─── الاستئناف الثاني (النهائي): رتبة الاستئناف فقط ────────────────────────
+  // الوثائق تنص: "الاستئناف الثاني (نهائي): رتبة الاستئناف فقط"
+  // لكن الكود كان يسمح لأي أدمن بمراجعته، فيتجاوز الغرض من رتبة الاستئناف.
+  // isAppealReviewer يرجع لـ isAdmin إذا لم تُعيَّن رتبة استئناف.
+  const isFinalAppeal =
+    reviewForPerm?.isAppeal && reviewForPerm?.appealNumber >= 2;
+
+  const hasPermission = isFinalAppeal
+    ? isAppealReviewer(member, config)
+    : isAdmin(member, config);
+
+  if (!hasPermission) {
     await interaction.reply({
-      embeds: [errorEmbed("ليس لديك صلاحية مراجعة العقوبات.\nتحتاج رتبة إدارة.")],
+      embeds: [errorEmbed(
+        isFinalAppeal
+          ? "الاستئناف النهائي لا يراجعه إلا مَن يملك **رتبة الاستئناف** أو الإدارة العليا."
+          : "ليس لديك صلاحية مراجعة العقوبات.\nتحتاج رتبة إدارة."
+      )],
       ephemeral: true,
     }).catch(() => {});
     return;
@@ -214,39 +232,12 @@ async function handleAccept(interaction, guild, reviewId, reviewerId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleReject(interaction, guild, reviewId, reviewerId) {
-  // فتح Modal لكتابة سبب الرفض
-  const {
-    ModalBuilder,
-    ActionRowBuilder,
-    TextInputBuilder,
-    TextInputStyle,
-  } = await import("discord.js");
-
-  const modal = new ModalBuilder()
-    .setCustomId(`reject_reason_modal:${reviewId}`)
-    .setTitle("❌ سبب الرفض")
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("reason")
-          .setLabel("سبب رفض العقوبة")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-          .setMaxLength(500)
-          .setPlaceholder("اختياري — اتركه فارغاً إن لم يكن هناك سبب محدد")
-      )
-    );
-
-  // showModal يعمل فقط قبل deferUpdate/reply
-  // لكننا قلنا deferUpdate بالفعل → نحتاج approach مختلف
-  // الحل: نستخدم followUp برسالة تطلب منه كتابة السبب عبر زر آخر
-  // أو: نكتفي بالرفض بدون Modal هنا ونضع سبباً افتراضياً
-
   // ─── ملاحظة تقنية ────────────────────────────────────────────────────────────
-  // Discord لا يسمح بـ showModal بعد deferUpdate
-  // لذلك نرفض مباشرة بدون سبب، والمراجع يستطيع كتابة السبب في الـ embed اليدوي
-  // بديل احترافي: نُعيد الزر بدون deferUpdate ونستخدم showModal مباشرة
-  // لكن لتبسيط الكود، نستخدم سبباً افتراضياً هنا
+  // كان هذا المعالج يبني Modal لسبب الرفض ثم لا يستخدمه أبداً (كود ميت)،
+  // لأن Discord لا يسمح بـ showModal بعد deferUpdate.
+  // الحل الحالي: رفض فوري بسبب اختياري فارغ — سريع وموثوق.
+  // لتفعيل سبب الرفض لاحقاً: أضف معالج isModalSubmit() في handleInteractionCreate
+  // وتعامل مع customId "reject_reason_modal:REVIEW_ID" قبل deferUpdate.
 
   try {
     const result = await rejectReview(guild, reviewId, reviewerId, "");
