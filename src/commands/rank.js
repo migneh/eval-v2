@@ -252,17 +252,26 @@ function buildHistorySection(history) {
 
   const lines = history.slice(0, 5).map((p) => {
     const typeLabel = typeLabels[p.type] || p.type;
-    const date      = new Date(p.timestamp).toLocaleDateString("ar-SA", {
-      day:   "numeric",
-      month: "short",
-      year:  "numeric",
-    });
+
+    // سجلات قديمة قد تفتقد timestamp أو points → new Date(undefined) يعطي
+    // "Invalid Date" و p.points.toLocaleString() يرمي خطأ ويُسقط الأمر كله
+    const date = p.timestamp
+      ? new Date(p.timestamp).toLocaleDateString("ar-SA", {
+          day:   "numeric",
+          month: "short",
+          year:  "numeric",
+        })
+      : "تاريخ غير معروف";
 
     const roleText = p.toRole
       ? `<@&${p.toRole}>`
       : "لا رتبة";
 
-    return `${typeLabel} → ${roleText} • *${date}* • ${p.points.toLocaleString()} نقطة`;
+    const pointsText = Number.isFinite(p.points)
+      ? p.points.toLocaleString()
+      : "—";
+
+    return `${typeLabel} → ${roleText} • *${date}* • ${pointsText} نقطة`;
   });
 
   return lines.join("\n");

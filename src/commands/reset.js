@@ -25,6 +25,8 @@ import {
   saveUserPoints,
   getPoints,
   savePoints,
+  saveXpState,
+  saveTaskProgress,
 } from "../utils/db.js";
 
 import { requireAdmin }              from "../utils/perms.js";
@@ -167,6 +169,12 @@ export async function execute(interaction) {
 async function executeResetAll(interaction, btnInteraction, memberCount, prevTotal) {
   // تصفير كل بيانات النقاط
   savePoints(interaction.guildId, {});
+
+  // ─── تصفير الحالات المرتبطة ────────────────────────────────────────────────
+  // بدون هذا يبقى تقدم المهام "مكتملاً" وحالة XP اليومية محفوظة،
+  // فيبدو المشرف وكأنه استنفد مهامه رغم أن نقاطه صُفّرت
+  saveXpState(interaction.guildId, {});
+  saveTaskProgress(interaction.guildId, {});
 
   await btnInteraction.update({
     embeds: [

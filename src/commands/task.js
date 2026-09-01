@@ -29,6 +29,7 @@ import {
 } from "../utils/db.js";
 
 import { requireAdmin }                                from "../utils/perms.js";
+import { parsePositiveInt }                            from "../utils/validate.js";
 import { getTypeLabel, getPeriodLabel, buildProgressBar } from "../systems/tasks.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,20 +229,21 @@ async function handleSetup(interaction) {
   const rawPoints = modalSubmit.fields.getTextInputValue("task_points").trim();
   const rawPeriod = modalSubmit.fields.getTextInputValue("task_period").trim().toLowerCase();
 
-  const goal   = parseInt(rawGoal);
-  const points = parseInt(rawPoints);
+  // تحقّق صارم: يرفض "50abc" و "12.5" التي كان parseInt يقبلها بصمت
+  const goal   = parsePositiveInt(rawGoal,   { max: 99999 });
+  const points = parsePositiveInt(rawPoints, { max: 99999 });
 
   // فحص الأرقام
-  if (isNaN(goal) || goal <= 0) {
+  if (goal == null) {
     return modalSubmit.reply({
-      embeds: [errorEmbed("الهدف يجب أن يكون رقماً صحيحاً موجباً.")],
+      embeds: [errorEmbed("الهدف يجب أن يكون رقماً صحيحاً موجباً (بدون حروف أو فواصل).")],
       ephemeral: true,
     });
   }
 
-  if (isNaN(points) || points <= 0) {
+  if (points == null) {
     return modalSubmit.reply({
-      embeds: [errorEmbed("النقاط يجب أن تكون رقماً صحيحاً موجباً.")],
+      embeds: [errorEmbed("النقاط يجب أن تكون رقماً صحيحاً موجباً (بدون حروف أو فواصل).")],
       ephemeral: true,
     });
   }

@@ -26,23 +26,63 @@ function guildDir(guildId) {
 
 /**
  * يقرأ ملف JSON ويُرجع محتواه أو القيمة الافتراضية عند الخطأ
+ *
+ * عند تلف الملف: يحفظ نسخة منه قبل الرجوع للقيمة الافتراضية،
+ * لأن الرجوع الصامت كان يعني فقدان بيانات السيرفر بالكامل عند أول حفظ تالٍ.
  */
 function readJSON(filePath, defaultValue = {}) {
   try {
     if (!fs.existsSync(filePath)) return defaultValue;
+
     const raw = fs.readFileSync(filePath, "utf8");
+
+    // ملف فارغ (نتيجة كتابة توقفت في منتصفها) — تعامله كملف تالف
+    if (raw.trim() === "") throw new Error("ملف فارغ");
+
     return JSON.parse(raw);
-  } catch {
-    // الملف تالف أو فارغ → ارجع بالقيمة الافتراضية
+  } catch (err) {
+    console.error(`❌ ملف بيانات تالف: ${filePath} — ${err.message}`);
+
+    // احفظ الأدلة قبل الرجوع للقيمة الافتراضية
+    try {
+      if (fs.existsSync(filePath)) {
+        const backup = `${filePath}.corrupt-${Date.now()}`;
+        fs.copyFileSync(filePath, backup);
+        console.error(`💾 تم حفظ نسخة من الملف التالف في: ${backup}`);
+      }
+    } catch {
+      // لا نستطيع حفظ نسخة — على الأقل سجّلنا الخطأ
+    }
+
     return defaultValue;
   }
 }
 
 /**
- * يكتب بيانات كـ JSON منسّق في الملف
+ * يكتب بيانات كـ JSON منسّق في الملف — **بشكل ذري**
+ *
+ * لماذا الذرية مهمة؟
+ *   writeFileSync يفرّغ الملف أولاً ثم يكتب. إذا توقفت العملية بينهما
+ *   (انقطاع كهرباء، إعادة تشغيل، crash) يبقى الملف فارغاً أو ناقصاً،
+ *   وreadJSON يرجّع {} بصمت → تضيع نقاط كل المشرفين في السيرفر.
+ *
+ * الحل: نكتب في ملف مؤقت ثم نبدّله بالأصلي (rename عملية ذرية).
  */
 function writeJSON(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+  const tmpPath = `${filePath}.tmp`;
+
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    // نظّف الملف المؤقت حتى لا يتراكم
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {
+      // تجاهل
+    }
+    throw err;
+  }
 }
 
 /**

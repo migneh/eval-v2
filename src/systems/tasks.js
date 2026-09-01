@@ -211,32 +211,85 @@ async function checkTaskWarning(guild, userId, roleId, taskDef, p, periodMs, now
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * يفحص كل مشرفي السيرفر ويُرسل إشعارات للمهام المنتهية غير المكتملة
- * يُستدعى كل ساعة من index.js (اختياري)
+ * يفحص كل مشرفي السيرفر ويُرسل إشعاراً للمهام المنتهية غير المكتملة
+ * يُستدعى كل ساعة من index.js
+ *
+ * القواعد (مهمة — كانت مصدر إزعاج):
+ *   ✅ يُرسل إشعاراً **واحداً فقط** لكل دورة مهمة (يتتبع lastExpiredNotice)
+ *   ✅ يتجاهل من لم يعد يملك الرتبة أو غادر السيرفر
+ *   ✅ يُصفّر التقدم بعد الإشعار لتبدأ الدورة الجديدة نظيفة
  *
  * @param {Guild} guild
+ * @returns {Promise<number>} - عدد الإشعارات المُرسلة
  */
 export async function checkExpiredTasks(guild) {
-  const taskConfig  = getTaskConfig(guild.id);
-  const progress    = getTaskProgress(guild.id);
-  const now         = Date.now();
+  const taskConfig = getTaskConfig(guild.id);
 
-  if (!Object.keys(taskConfig).length) return;
+  if (!Object.keys(taskConfig).length) return 0;
+
+  const progress = getTaskProgress(guild.id);
+  const now      = Date.now();
+  const config   = getConfig(guild.id);
+  let   notified = 0;
+  let   changed  = false;
 
   for (const [userId, userProgress] of Object.entries(progress)) {
+
+    // ─── هل المشرف ما زال في السيرفر؟ ────────────────────────────────────────
+    let member;
+    try {
+      member = await guild.members.fetch(userId);
+    } catch {
+      // غادر السيرفر — نظّف تقدمه بالكامل لمنع تراكم الملف
+      delete progress[userId];
+      changed = true;
+      continue;
+    }
+
+    if (member.user?.bot) continue;
+
     for (const [roleId, taskDef] of Object.entries(taskConfig)) {
       const p = userProgress[roleId];
       if (!p || p.completed) continue;
 
-      const periodMs = getPeriodMs(taskDef.period);
-      const timeLeft = periodMs - (now - p.lastReset);
+      // لم يعد يملك الرتبة → المهمة لا تنطبق عليه
+      if (!member.roles.cache.has(roleId)) continue;
 
-      // انتهى الوقت
-      if (timeLeft <= 0) {
-        await sendTaskExpiredDM(guild, userId, taskDef, roleId, p);
-      }
+      const periodMs = getPeriodMs(taskDef.period);
+      const timeLeft = periodMs - (now - (p.lastReset || now));
+
+      if (timeLeft > 0) continue;   // ما زالت في وقتها
+
+      // ─── هل أرسلنا إشعاراً لهذه الدورة بالفعل؟ ─────────────────────────────
+      // بدون هذا الفحص يُرسل الإشعار كل ساعة إلى الأبد ← spam
+      const alreadyNotified =
+        p.lastExpiredNotice && (now - p.lastExpiredNotice) < periodMs;
+
+      if (alreadyNotified) continue;
+
+      await sendTaskExpiredDM(guild, userId, taskDef, roleId, p);
+      notified++;
+
+      // ─── صَفّر الدورة المنتهية لتبدأ الجديدة نظيفة ─────────────────────────
+      p.current           = 0;
+      p.completed         = false;
+      p.lastWarned        = 0;
+      p.lastReset         = now;
+      p.lastExpiredNotice = now;
+      changed             = true;
     }
   }
+
+  if (changed) saveTaskProgress(guild.id, progress);
+
+  if (notified > 0) {
+    await log(guild, LogType.TASK, makeLogEmbed(LogType.TASK,
+      "⌛ انتهت مهام دون إكمال",
+      [{ name: "عدد المهام المنتهية", value: `${notified}`, inline: true }]
+    ));
+  }
+
+  return notified;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

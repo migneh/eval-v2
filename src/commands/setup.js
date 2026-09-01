@@ -36,6 +36,7 @@ import {
 import { getConfig, saveConfig }              from "../utils/db.js";
 import { requireAdmin }                        from "../utils/perms.js";
 import { log, makeLogEmbed, LogType }          from "../utils/logger.js";
+import { parsePositiveInt }                    from "../utils/validate.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تعريف الأمر
@@ -122,7 +123,7 @@ function buildMainEmbed(config, guild) {
           `إعلانات ترقية: ${config.promotionAnnouncementChannel ? `<#${config.promotionAnnouncementChannel}>` : "❌"}`,
           `سجل النقاط: ${config.logChannels?.points ? `<#${config.logChannels.points}>` : "❌"}`,
           `سجل الموديريشن: ${config.logChannels?.moderation ? `<#${config.logChannels.moderation}>` : "❌"}`,
-          `سجل الترقيات: ${config.logChannels?.promotions ? `<#${config.logChannels.promotions}>` : "❌"}`,
+          `سجل الترقيات: ${config.logChannels?.rewards ? `<#${config.logChannels.rewards}>` : "❌"}`,
           `سجل كامل: ${config.logChannels?.all ? `<#${config.logChannels.all}>` : "❌"}`,
         ].join("\n"),
         inline: false,
@@ -471,10 +472,23 @@ async function handleXp(i, config, interaction) {
     return refreshMain(interaction, config);
   }
 
-  const minXp     = parseInt(modalSubmit.fields.getTextInputValue("xp_min"))     || 5;
-  const maxXp     = parseInt(modalSubmit.fields.getTextInputValue("xp_max"))     || 35;
-  const cooldown  = parseInt(modalSubmit.fields.getTextInputValue("xp_cooldown"))|| 60;
-  const dailyLimit = parseInt(modalSubmit.fields.getTextInputValue("xp_daily"))  || 500;
+  const minXp      = parsePositiveInt(modalSubmit.fields.getTextInputValue("xp_min"),      { max: 1000 }) ?? 5;
+  const maxXp      = parsePositiveInt(modalSubmit.fields.getTextInputValue("xp_max"),      { max: 1000 }) ?? 35;
+  const cooldown   = parsePositiveInt(modalSubmit.fields.getTextInputValue("xp_cooldown"), { max: 3600 }) ?? 60;
+  const dailyLimit = parsePositiveInt(modalSubmit.fields.getTextInputValue("xp_daily"),    { max: 100000 }) ?? 500;
+
+  // minXp يجب ألا يتجاوز maxXp — وإلا تولّد XP ثابت أو سالب
+  if (minXp > maxXp) {
+    return modalSubmit.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xed4245)
+          .setDescription(`❌ الحد الأدنى (**${minXp}**) لا يمكن أن يكون أكبر من الحد الأقصى (**${maxXp}**).`)
+          .setTimestamp(),
+      ],
+      ephemeral: true,
+    });
+  }
 
   config.xp = { minXp, maxXp, cooldown, dailyLimit };
   saveConfig(interaction.guildId, config);
@@ -535,9 +549,9 @@ async function handleModPoints(i, config, interaction) {
     return refreshMain(interaction, config);
   }
 
-  const warn            = parseInt(modalSubmit.fields.getTextInputValue("mp_warn"))         || 10;
-  const timeoutBase     = parseInt(modalSubmit.fields.getTextInputValue("mp_timeout_base")) || 5;
-  const timeoutPerHour  = parseInt(modalSubmit.fields.getTextInputValue("mp_timeout_hour")) || 3;
+  const warn           = parsePositiveInt(modalSubmit.fields.getTextInputValue("mp_warn"),          { max: 10000 }) ?? 10;
+  const timeoutBase    = parsePositiveInt(modalSubmit.fields.getTextInputValue("mp_timeout_base"),  { max: 10000 }) ?? 5;
+  const timeoutPerHour = parsePositiveInt(modalSubmit.fields.getTextInputValue("mp_timeout_hour"),  { max: 10000 }) ?? 3;
 
   config.modPoints = { warn, timeoutBase, timeoutPerHour };
   saveConfig(interaction.guildId, config);
@@ -601,9 +615,9 @@ async function handleMilestones(i, config, interaction) {
 
   for (const line of lines) {
     const [rawPoints, rawRoleId] = line.split(",").map((s) => s.trim());
-    const points = parseInt(rawPoints);
+    const points = parsePositiveInt(rawPoints, { max: 10_000_000 });
 
-    if (isNaN(points) || points <= 0) {
+    if (points == null) {
       errors.push(`سطر غير صالح: "${line}" — النقاط يجب أن تكون رقماً موجباً`);
       continue;
     }
@@ -687,20 +701,20 @@ async function handleLogChannels(i, config, interaction) {
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId("log_promotions")
-          .setLabel("سجل الترقيات — channel ID")
+          .setCustomId("log_rewards")
+          .setLabel("سجل الترقيات والمكافآت — channel ID")
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
-          .setValue(config.logChannels?.promotions || "")
+          .setValue(config.logChannels?.rewards || "")
           .setPlaceholder("1234567890123456789")
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId("log_reviews")
-          .setLabel("سجل المراجعات + قناة إعلانات الترقية — channel ID")
+          .setCustomId("promo_channel")
+          .setLabel("قناة إعلانات الترقيات (عامة) — channel ID")
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
-          .setValue(config.logChannels?.reviews || config.promotionAnnouncementChannel || "")
+          .setValue(config.promotionAnnouncementChannel || "")
           .setPlaceholder("1234567890123456789")
       ),
     );
@@ -726,16 +740,30 @@ async function handleLogChannels(i, config, interaction) {
   const all        = parseId(modalSubmit.fields.getTextInputValue("log_all"));
   const points     = parseId(modalSubmit.fields.getTextInputValue("log_points"));
   const moderation = parseId(modalSubmit.fields.getTextInputValue("log_moderation"));
-  const promotions = parseId(modalSubmit.fields.getTextInputValue("log_promotions"));
-  const reviews    = parseId(modalSubmit.fields.getTextInputValue("log_reviews"));
+  const rewards    = parseId(modalSubmit.fields.getTextInputValue("log_rewards"));
+  const promoCh    = parseId(modalSubmit.fields.getTextInputValue("promo_channel"));
 
-  config.logChannels = { all, points, moderation, promotions, reviews };
+  // ─── دمج بدل الاستبدال ────────────────────────────────────────────────────
+  // الاستبدال الكامل كان يمسح مفاتيح appeals / tasks / settings
+  // التي لا تظهر في هذا الـ modal (Discord يسمح بـ 5 حقول فقط)
+  config.logChannels = {
+    ...(config.logChannels || {}),
+    all,
+    points,
+    moderation,
+    rewards,
+  };
 
-  // قناة إعلانات الترقية = قناة المراجعات (اختياري — يمكن تعديله)
-  if (reviews) config.promotionAnnouncementChannel = reviews;
+  // قناة إعلانات الترقيات منفصلة تماماً عن قنوات السجل
+  config.promotionAnnouncementChannel = promoCh;
 
   saveConfig(interaction.guildId, config);
-  await logChange(interaction, "📢 قنوات السجل", "تم تحديث قنوات السجل");
+  await logChange(
+    interaction,
+    "📢 قنوات السجل",
+    `all:${all ?? "-"} points:${points ?? "-"} moderation:${moderation ?? "-"} ` +
+    `rewards:${rewards ?? "-"} promo:${promoCh ?? "-"}`,
+  );
 
   await modalSubmit.deferUpdate();
   await interaction.editReply({
@@ -801,10 +829,10 @@ async function handleLimits(i, config, interaction) {
     return refreshMain(interaction, config);
   }
 
-  const maxAdd       = parseInt(modalSubmit.fields.getTextInputValue("limit_maxadd"))     || 500;
-  const maxRemove    = parseInt(modalSubmit.fields.getTextInputValue("limit_maxremove"))  || 500;
-  const abuseCooldown = parseInt(modalSubmit.fields.getTextInputValue("limit_cooldown")) || 30;
-  const maxMembers   = parseInt(modalSubmit.fields.getTextInputValue("limit_maxmembers"))|| 10;
+  const maxAdd        = parsePositiveInt(modalSubmit.fields.getTextInputValue("limit_maxadd"),     { max: 100000 }) ?? 500;
+  const maxRemove     = parsePositiveInt(modalSubmit.fields.getTextInputValue("limit_maxremove"),  { max: 100000 }) ?? 500;
+  const abuseCooldown = parsePositiveInt(modalSubmit.fields.getTextInputValue("limit_cooldown"),   { max: 3600 })   ?? 30;
+  const maxMembers    = parsePositiveInt(modalSubmit.fields.getTextInputValue("limit_maxmembers"), { max: 25 })     ?? 10;
 
   config.limits = { maxAdd, maxRemove, abuseCooldown, maxMembers };
   saveConfig(interaction.guildId, config);

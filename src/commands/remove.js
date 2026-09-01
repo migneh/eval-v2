@@ -31,9 +31,8 @@ import {
 import { getConfig, addPointsToUser, getUserPoints } from "../utils/db.js";
 import { requireAdmin, requireNotSelf }              from "../utils/perms.js";
 import { log, makeLogEmbed, LogType }                from "../utils/logger.js";
-
-// ─── Anti-Abuse Cooldown Store ────────────────────────────────────────────────
-const abuseCooldowns = new Map();
+import { getCooldownLeft, setCooldown }              from "../utils/cooldown.js";
+import { parsePositiveInt }                          from "../utils/validate.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تعريف الأمر
@@ -63,8 +62,7 @@ export async function execute(interaction) {
   // ─── 2. فحص Anti-Abuse Cooldown ──────────────────────────────────────────────
   const abKey        = `${interaction.guildId}:${interaction.user.id}`;
   const abCooldownMs = (config.limits?.abuseCooldown ?? 30) * 1000;
-  const lastUsed     = abuseCooldowns.get(abKey) || 0;
-  const cooldownLeft = abCooldownMs - (Date.now() - lastUsed);
+  const cooldownLeft = getCooldownLeft("abuse", abKey) * 1000;
 
   if (cooldownLeft > 0) {
     return interaction.reply({
@@ -130,8 +128,14 @@ export async function execute(interaction) {
 
   const selectedUsers = selectInteraction.values;
 
+  // ─── أقرّ باستلام الاختيار أولاً لتفادي "This interaction failed" ────────────
+  await selectInteraction.deferUpdate().catch(() => {});
+
   // ─── فحص: لا يخصم من نفسه ─────────────────────────────────────────────────────
-  if (!requireNotSelf(selectInteraction, selectedUsers)) return;
+  if (!requireNotSelf(interaction, selectedUsers)) {
+    await interaction.editReply({ components: [] }).catch(() => {});
+    return;
+  }
 
   // ─── 5. Modal — كتابة عدد النقاط ─────────────────────────────────────────────
   const modal = new ModalBuilder()
@@ -167,26 +171,18 @@ export async function execute(interaction) {
   }
 
   // ─── تحقق من صحة المدخل ──────────────────────────────────────────────────────
-  const rawAmount = modalSubmit.fields.getTextInputValue("points_amount").trim();
-  const amount    = parseInt(rawAmount);
+  const rawAmount = modalSubmit.fields.getTextInputValue("points_amount");
+  const amount    = parsePositiveInt(rawAmount, { max: maxRemove });
 
-  if (isNaN(amount) || amount <= 0 || !Number.isInteger(amount)) {
+  if (amount == null) {
     return modalSubmit.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0xed4245)
-          .setDescription("❌ عدد النقاط يجب أن يكون رقماً صحيحاً موجباً.")
-      ],
-      ephemeral: true,
-    });
-  }
-
-  if (amount > maxRemove) {
-    return modalSubmit.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xed4245)
-          .setDescription(`❌ الحد الأقصى للخصم هو **${maxRemove} نقطة** في العملية الواحدة.`)
+          .setDescription(
+            `❌ عدد النقاط يجب أن يكون رقماً صحيحاً موجباً (بدون فواصل أو حروف).\n` +
+            `المدى المسموح: **1 — ${maxRemove}**`
+          )
       ],
       ephemeral: true,
     });
@@ -255,7 +251,7 @@ export async function execute(interaction) {
   }
 
   // ─── 7. تطبيق الخصم ──────────────────────────────────────────────────────────
-  abuseCooldowns.set(abKey, Date.now());
+  setCooldown("abuse", abKey, abCooldownMs);
 
   const results = [];
   for (const userId of selectedUsers) {

@@ -89,12 +89,9 @@ export async function checkPromotion(guild, userId, triggeredBy = "auto") {
   // ─── الرتبة السابقة (للتسجيل) ────────────────────────────────────────────────
   const previousRoleId = currentMilestoneRoles[0] || null;
 
-  // إذا كان لديه الرتبة المستهدفة بالفعل (حتى لو مع رتب أخرى)
-  // نُنظّف فقط ونحتفظ بالمستهدفة
-  if (currentMilestoneRoles.includes(targetRoleId) && currentMilestoneRoles.length === 1) {
-    return;
-  }
-
+  // ملاحظة: كان هناك فحص مكرر هنا يتحقق من نفس الشرط الذي رُفض أعلاه
+  // (currentMilestoneRoles.length === 1 && [0] === targetRoleId)،
+  // أي أنه كود غير قابل للوصول — حُذف.
   // ─── تطبيق التغيير ───────────────────────────────────────────────────────────
   await applyRoleChange(guild, member, allMilestoneRoleIds, targetRoleId);
 
@@ -349,16 +346,28 @@ function getHighestEligibleMilestone(milestones, totalPoints) {
  * @param {string}      targetRoleId  - الرتبة المستهدفة
  */
 async function applyRoleChange(guild, member, allRoleIds, targetRoleId) {
-  // 1. احذف كل رتب السلم التي يملكها
-  for (const roleId of allRoleIds) {
-    if (member.roles.cache.has(roleId) && roleId !== targetRoleId) {
-      await member.roles.remove(roleId, "تعديل رتبة السلم الوظيفي").catch(() => {});
-    }
+  // 1. احذف كل رتب السلم التي يملكها (ما عدا المستهدفة)
+  const toRemove = allRoleIds.filter(
+    (roleId) => roleId !== targetRoleId && member.roles.cache.has(roleId)
+  );
+
+  // حذف دفعة واحدة — كان الكود يستدعي remove() لكل رتبة على حدة،
+  // وهذا يعني N طلبات API لكل ترقية واستهلاك أسرع للـ rate limit
+  if (toRemove.length) {
+    await member.roles
+      .remove(toRemove, "تعديل رتبة السلم الوظيفي")
+      .catch((err) => {
+        console.error("❌ فشل حذف رتب السلم:", err.message);
+      });
   }
 
   // 2. أضف الرتبة الجديدة إن لم يكن يملكها
   if (!member.roles.cache.has(targetRoleId)) {
-    await member.roles.add(targetRoleId, "ترقية في السلم الوظيفي").catch(() => {});
+    await member.roles
+      .add(targetRoleId, "ترقية في السلم الوظيفي")
+      .catch((err) => {
+        console.error(`❌ فشل إضافة الرتبة ${targetRoleId}:`, err.message);
+      });
   }
 }
 

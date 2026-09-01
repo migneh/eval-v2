@@ -24,7 +24,7 @@ import {
 
 import { getConfig }      from "../utils/db.js";
 import { requireAdmin }   from "../utils/perms.js";
-import { createReview }   from "../systems/reviews.js";
+import { createReview, awardWithoutReview } from "../systems/reviews.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /warn
@@ -142,10 +142,25 @@ export async function executeWarn(interaction) {
     });
     embed.setFooter({ text: "ستُضاف النقاط بعد قبول المراجعة" });
   } else {
-    embed.addFields({
-      name:  "⚠️ تنبيه",
-      value: "لا توجد قناة مراجعة مُعدَّة. استخدم `/setup` لتحديدها.",
+    // لا توجد قناة مراجعة → لا يوجد من يقبل → امنح النقاط فوراً
+    // وإلا نفّذ المشرف العقوبة ولم يحصل على أي نقاط
+    const autoPoints = await awardWithoutReview(interaction.guild, {
+      type:       "warn",
+      executorId: interaction.user.id,
+      targetId:   targetUser.id,
+      reason,
     });
+
+    embed.addFields(
+      {
+        name:  "⚠️ تنبيه",
+        value: "لا توجد قناة مراجعة مُعدَّة. استخدم `/setup` لتحديدها.",
+      },
+      {
+        name:  "🏆 النقاط",
+        value: `أُضيفت **+${autoPoints} نقطة** مباشرة (بدون مراجعة لعدم وجود قناة مراجعة).`,
+      },
+    );
   }
 
   await interaction.editReply({ embeds: [embed] });
@@ -305,10 +320,24 @@ export async function executeTimeout(interaction) {
     });
     embed.setFooter({ text: "ستُضاف النقاط بعد قبول المراجعة • إذا رُفض يُشال التوقيف تلقائياً" });
   } else {
-    embed.addFields({
-      name:  "⚠️ تنبيه",
-      value: "لا توجد قناة مراجعة مُعدَّة. استخدم `/setup` لتحديدها.",
+    const autoPoints = await awardWithoutReview(interaction.guild, {
+      type:       "timeout",
+      executorId: interaction.user.id,
+      targetId:   targetUser.id,
+      reason,
+      duration,
     });
+
+    embed.addFields(
+      {
+        name:  "⚠️ تنبيه",
+        value: "لا توجد قناة مراجعة مُعدَّة. استخدم `/setup` لتحديدها.",
+      },
+      {
+        name:  "🏆 النقاط",
+        value: `أُضيفت **+${autoPoints} نقطة** مباشرة (بدون مراجعة لعدم وجود قناة مراجعة).`,
+      },
+    );
   }
 
   await interaction.editReply({ embeds: [embed] });

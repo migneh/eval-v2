@@ -28,7 +28,7 @@ import {
 } from "discord.js";
 
 import { getConfig, getReviews }               from "../utils/db.js";
-import { requireMod }                           from "../utils/perms.js";
+import { requireMod, isAdmin }                   from "../utils/perms.js";
 import { createAppeal, getUserReviews }         from "../systems/reviews.js";
 import { formatDuration }                       from "./moderation.js";
 
@@ -425,11 +425,13 @@ async function handleStatus(interaction) {
 
   // ─── ليس طلبه (إلا إذا كان أدمن) ─────────────────────────────────────────────
   const config = getConfig(interaction.guildId);
-  const isOwner   = interaction.guild.ownerId === interaction.user.id;
-  const isAdminUser = interaction.member.permissions.has("Administrator");
+
+  // isAdmin يغطّي المالك + Administrator + رتب الإدارة المخصّصة،
+  // بينما الفحص القديم كان يتجاهل رتب الإدارة المضافة من /setup
+  const canViewAny = isAdmin(interaction.member, config);
   const isHisReview = review.executorId === interaction.user.id;
 
-  if (!isHisReview && !isOwner && !isAdminUser) {
+  if (!isHisReview && !canViewAny) {
     return interaction.reply({
       embeds: [errorEmbed("لا يمكنك عرض تفاصيل طلب ليس لك.")],
       ephemeral: true,

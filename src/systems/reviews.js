@@ -217,6 +217,62 @@ export async function createReview(guild, data) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// منح النقاط مباشرة (بدون مراجعة)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * يمنح المشرف نقاط العقوبة فوراً بدون انتظار مراجع
+ *
+ * متى يُستخدم؟
+ *   عندما لا تكون هناك قناة مراجعة مُعدَّة — حينها createReview() يُرجع null
+ *   ولا يوجد أحد ليقبل الطلب، فتضيع نقاط المشرف بالكامل بصمت.
+ *   هذا خطأ في العدالة: العقوبة نُفِّذت فعلاً والمشرف قام بعمله.
+ *
+ * @param {Guild}  guild
+ * @param {object} data - { type, executorId, targetId, reason, duration? }
+ * @returns {Promise<number>} - النقاط الممنوحة
+ */
+export async function awardWithoutReview(guild, data) {
+  const config = getConfig(guild.id);
+  const points = calcExpectedPoints({ type: data.type, duration: data.duration }, config);
+
+  addPointsToUser(
+    guild.id,
+    data.executorId,
+    points,
+    "moderation",
+    `عقوبة مباشرة (بدون مراجعة): ${data.type === "warn" ? "تحذير" : "تايم أوت"}`,
+    null,
+  );
+
+  addMemberLogEntry(guild.id, data.targetId, {
+    type:       data.type,
+    duration:   data.duration ?? null,
+    reason:     data.reason || "لا يوجد سبب",
+    executorId: data.executorId,
+    reviewerId: null,
+    result:     "مقبولة تلقائياً (لا توجد قناة مراجعة)",
+  });
+
+  await log(guild, LogType.MODERATION, makeLogEmbed(LogType.MODERATION,
+    "⚡ عقوبة بلا مراجعة — أُضيفت النقاط مباشرة",
+    [
+      { name: "المشرف",  value: `<@${data.executorId}>`, inline: true },
+      { name: "العضو",   value: `<@${data.targetId}>`,   inline: true },
+      { name: "النقاط",  value: `+${points}`,            inline: true },
+      {
+        name:  "⚠️ السبب",
+        value: "لا توجد قناة مراجعة مُعدَّة. أضفها من `/setup` لتفعيل نظام المراجعة.",
+      },
+    ]
+  ));
+
+  await checkPromotion(guild, data.executorId);
+
+  return points;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // إنشاء استئناف
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -376,6 +432,13 @@ export async function acceptReview(guild, reviewId, reviewerId) {
     result:     review.isAppeal ? "قُبل الاستئناف" : "مقبولة",
   });
 
+  // ─── إعادة تطبيق العقوبة (عند قبول استئناف) ────────────────────────────────
+  // عند رفض عقوبة تايم أوت يزيلها rejectReview() عن العضو.
+  // إذا قُبل الاستئناف لاحقاً يجب إعادتها — وإلا يستفيد العضو من التأخير فقط.
+  if (review.isAppeal && review.type === "timeout" && review.duration) {
+    await reapplyTimeout(guild, review);
+  }
+
   // ─── تحديث بطاقة المراجعة ────────────────────────────────────────────────────
   await updateReviewMessage(guild, review, {
     status:     "✅ مقبولة",
@@ -512,6 +575,30 @@ function calcExpectedPoints(review, config) {
     : 0;
 
   return base + (perHour * hours);
+}
+
+/**
+ * يُعيد تطبيق التوقيف على العضو بعد قبول استئناف
+ * يفشل بصمت إذا غادر العضو أو كان البوت أقل رتبة
+ *
+ * @param {Guild}  guild
+ * @param {object} review
+ */
+async function reapplyTimeout(guild, review) {
+  try {
+    const targetMember = await guild.members.fetch(review.targetId);
+    const durationMs   = review.duration * 60 * 1000;
+
+    await targetMember.timeout(
+      durationMs,
+      `إعادة توقيف بعد قبول الاستئناف — ${review.reason || "لا يوجد سبب"}`,
+    );
+  } catch (err) {
+    console.error(
+      `❌ تعذّر إعادة التوقيف للعضو ${review.targetId} (طلب ${review.id}):`,
+      err.message,
+    );
+  }
 }
 
 /**

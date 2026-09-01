@@ -214,39 +214,12 @@ async function handleAccept(interaction, guild, reviewId, reviewerId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleReject(interaction, guild, reviewId, reviewerId) {
-  // فتح Modal لكتابة سبب الرفض
-  const {
-    ModalBuilder,
-    ActionRowBuilder,
-    TextInputBuilder,
-    TextInputStyle,
-  } = await import("discord.js");
-
-  const modal = new ModalBuilder()
-    .setCustomId(`reject_reason_modal:${reviewId}`)
-    .setTitle("❌ سبب الرفض")
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("reason")
-          .setLabel("سبب رفض العقوبة")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-          .setMaxLength(500)
-          .setPlaceholder("اختياري — اتركه فارغاً إن لم يكن هناك سبب محدد")
-      )
-    );
-
-  // showModal يعمل فقط قبل deferUpdate/reply
-  // لكننا قلنا deferUpdate بالفعل → نحتاج approach مختلف
-  // الحل: نستخدم followUp برسالة تطلب منه كتابة السبب عبر زر آخر
-  // أو: نكتفي بالرفض بدون Modal هنا ونضع سبباً افتراضياً
-
   // ─── ملاحظة تقنية ────────────────────────────────────────────────────────────
-  // Discord لا يسمح بـ showModal بعد deferUpdate
-  // لذلك نرفض مباشرة بدون سبب، والمراجع يستطيع كتابة السبب في الـ embed اليدوي
-  // بديل احترافي: نُعيد الزر بدون deferUpdate ونستخدم showModal مباشرة
-  // لكن لتبسيط الكود، نستخدم سبباً افتراضياً هنا
+  // كان هذا المعالج يبني Modal لسبب الرفض ثم لا يستخدمه أبداً (كود ميت)،
+  // لأن Discord لا يسمح بـ showModal بعد deferUpdate.
+  // الحل الحالي: رفض فوري بسبب اختياري فارغ — سريع وموثوق.
+  // لتفعيل سبب الرفض لاحقاً: أضف معالج isModalSubmit() في handleInteractionCreate
+  // وتعامل مع customId "reject_reason_modal:REVIEW_ID" قبل deferUpdate.
 
   try {
     const result = await rejectReview(guild, reviewId, reviewerId, "");
